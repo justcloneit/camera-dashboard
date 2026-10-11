@@ -1,6 +1,4 @@
 # Camera Dashboard
-
-**Version:** V161  
 **Application file:** `camera_dashboard.py`  
 **Project type:** Standalone Python / Flask CCTV & NVR management dashboard  
 **Database:** SQLite  
@@ -1297,14 +1295,6 @@ Deployment configuration should permanently reference:
 camera_dashboard.py
 ```
 
-The Python application itself is versioned during development:
-
-```text
-camera_dashboard_v160.py
-camera_dashboard_v161.py
-camera_dashboard_v162.py
-...
-```
 
 After receiving a new version, the deployment file can continue to use:
 
@@ -1467,17 +1457,6 @@ The application is intentionally designed around known inventory and bounded dia
 
 Application versions are sequential.
 
-Example:
-
-```text
-V158
-V159
-V160
-V161
-V162
-...
-```
-
 A modified application should always receive a new version number.
 
 Do not reuse an old version number for a different code revision.
@@ -1485,12 +1464,6 @@ Do not reuse an old version number for a different code revision.
 ### Application version
 
 Changes whenever application code changes.
-
-Example:
-
-```python
-VERSION = "161.0"
-```
 
 ### Schema version
 
