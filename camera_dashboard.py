@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Camera Dashboard v177.0 — Single-File RTSP Camera Dashboard
+Camera Dashboard v179.0 — Single-File RTSP Camera Dashboard
 ==========================================================
 Database · Discovery · Validation · Streaming · Telegram · Browser UI
 
@@ -191,7 +191,7 @@ except ImportError:
 # CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-VERSION = '177.0'
+VERSION = '179.0'
 SCHEMA_VERSION = 140
 SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
 # Default runtime/data location is the project workspace itself.
@@ -4222,6 +4222,8 @@ def _db_get_group_stats_uncached() -> list[dict]:
         params.extend([user, user])
     rows = c.execute(f'''
         SELECT COALESCE(NULLIF(c.group_name,''), NULLIF(c.country,''), 'Unknown') AS display_group,
+               MAX(NULLIF(c.area,'')) AS area, MAX(NULLIF(c.city,'')) AS city,
+               MAX(NULLIF(c.region,'')) AS region, MAX(NULLIF(c.country,'')) AS country,
                COUNT(*) AS total, SUM(c.status='online') AS online, SUM(c.status='offline') AS offline,
                SUM(c.status='checking') AS checking, SUM(c.status='unknown') AS unknown,
                SUM(c.favorite=1) AS favorites, MIN(c.source_file) AS sample_source, MAX(c.last_seen) AS last_active
@@ -4233,6 +4235,16 @@ def _db_get_group_stats_uncached() -> list[dict]:
         d=dict(r)
         for k,v in d.items():
             if isinstance(v,str): d[k]=_safe_str(v)
+        # Replace placeholder category prefixes such as "XX - Hikvision - IP:port"
+        # with the best saved geographic label while preserving the original group key.
+        raw_group = _safe_str(d.get('display_group') or '')
+        location_parts = [d.get(k) for k in ('area', 'city', 'region', 'country')]
+        location_parts = list(dict.fromkeys(_safe_str(x).strip() for x in location_parts if _safe_str(x).strip()))
+        location_label = ', '.join(location_parts)
+        if re.match(r'^XX(?:\s|[-_:·]|$)', raw_group, re.I) and location_label:
+            d['display_title'] = location_label + re.sub(r'^XX', '', raw_group, count=1, flags=re.I)
+        else:
+            d['display_title'] = raw_group or location_label or 'Unknown location'
         out.append(d)
     return out
 
@@ -6255,6 +6267,7 @@ _HTML_CAM_GRID = r"""
       <button class="btn"            data-action="snap"  data-id="{{ cam.id }}">&#128247; Snap</button>
       <button class="btn"            data-action="tg"    data-id="{{ cam.id }}">&#10148; TG</button>
       {% endif %}
+      <button class="btn" data-action="geo-lookup" data-id="{{ cam.id }}" title="Look up approximate public-IP location and save city/region/country">🌍 Lookup Location</button>
       <button class="btn btn-primary" data-action="intel" data-id="{{ cam.id }}" title="On-demand NVR/DVR status, storage, users, playback and location">🖥 Device Intel</button>
       <button class="btn btn-primary" data-action="detect-feed" data-id="{{ cam.id }}" title="Detect an authenticated RTSP feed for this camera/door camera">📡 Detect Feed</button>
       {% if cam.web_url %}<a class="btn" href="{{ cam.web_url | e }}" target="_blank" rel="noopener">&#127760;</a>{% endif %}
@@ -6680,7 +6693,7 @@ dialog h2{margin-bottom:14px;font-size:16px;color:var(--accent)}
      data-loaded="{% if loop.first %}loading{% else %}false{% endif %}">
   <div class="section-header" onclick="toggleSection(this)">
     <span class="chevron">▶</span>
-    <h2>{% if loop.first %}⭐ {% endif %}{{ g.display_group | e }}</h2>
+    <h2>{% if loop.first %}⭐ {% endif %}{{ (g.display_title or g.display_group) | e }}</h2>
     <div class="sec-mini">
       {% if g.online %}<span style="color:#3fb950">🟢{{ g.online }}</span>{% endif %}
       {% if g.checking %}<span style="color:#d29922">🟡{{ g.checking }}</span>{% endif %}
@@ -6945,6 +6958,7 @@ async function doAction(act, id, card) {
     case 'tg':    sendTelegram(id); break;
     case 'device': openDeviceDetails(id); break;
     case 'intel': openDeviceIntel(id); break;
+    case 'geo-lookup': lookupCameraLocation(id); break;
   }
 }
 
@@ -8123,20 +8137,34 @@ async function runDeviceIntel(section) {
     out.textContent = JSON.stringify(d.data || d, null, 2);
   } catch (e) { status.textContent = 'Request failed: ' + (e?.message || e); }
 }
-async function lookupDeviceLocation() {
-  const status = document.getElementById('device-intel-status');
-  const out = document.getElementById('device-intel-result');
-  if (!activeIntelCameraId) return;
-  status.textContent = 'Looking up approximate public-IP location (multiple HTTPS providers)…';
+async function lookupCameraLocation(cameraId) {
+  const id = cameraId || activeIntelCameraId;
+  if (!id) return;
+  const card = document.querySelector('.cam-card[data-id="' + CSS.escape(id) + '"]');
+  const button = card?.querySelector('[data-action="geo-lookup"]');
+  if (button) { button.disabled = true; button.dataset.originalText = button.textContent; button.textContent = '🌍 Looking…'; }
   try {
-    const r = await fetch('/api/cameras/' + encodeURIComponent(activeIntelCameraId) + '/geo-update', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'lookup'})});
+    const r = await fetch('/api/cameras/' + encodeURIComponent(id) + '/geo-update', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode:'lookup'})
+    });
     const d = await r.json();
     if (!r.ok || !d.ok) throw Error(d.detail || ('HTTP ' + r.status));
-    status.textContent = d.updated ? 'Location looked up and saved. IP geolocation is approximate, not GPS.' : (d.detail || 'No reliable location returned; use Edit / Save Location.');
-    out.textContent = JSON.stringify(d, null, 2);
-    if (d.updated) setTimeout(() => location.reload(), 1200);
-  } catch (e) { status.textContent = 'Location lookup failed: ' + (e?.message || e); }
+    if (d.updated) {
+      showToast('📍 Location saved: ' + [d.geo?.city, d.geo?.region, d.geo?.country].filter(Boolean).join(', '));
+      setTimeout(() => location.reload(), 900);
+    } else {
+      showToast('Location not updated: ' + (d.detail || 'No usable public-IP location returned.'), true);
+    }
+    if (activeIntelCameraId === id) {
+      const status = document.getElementById('device-intel-status');
+      const out = document.getElementById('device-intel-result');
+      if (status) status.textContent = d.updated ? 'Location saved. IP geolocation is approximate, not GPS.' : (d.detail || 'No reliable location returned; use Edit / Save Location.');
+      if (out) out.textContent = JSON.stringify(d, null, 2);
+    }
+  } catch (e) { showToast('Location lookup failed: ' + (e?.message || e), true); }
+  finally { if (button) { button.disabled = false; button.textContent = button.dataset.originalText || '🌍 Lookup Location'; } }
 }
+async function lookupDeviceLocation() { return lookupCameraLocation(activeIntelCameraId); }
 async function editDeviceLocation() {
   if (!activeIntelCameraId) return;
   const card = document.querySelector('.cam-card[data-id="' + CSS.escape(activeIntelCameraId) + '"]');
@@ -9627,7 +9655,7 @@ def _device_geo(host: str, enabled: bool = False) -> dict:
     for provider, url in providers:
         try:
             response = _requests.get(url, timeout=(2.5, 3.5),
-                                     headers={'User-Agent': 'CameraDashboard/177.0'})
+                                     headers={'User-Agent': 'CameraDashboard/178.0'})
             if not response.ok:
                 failures.append(f'{provider}: HTTP {response.status_code}')
                 continue
